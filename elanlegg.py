@@ -8,11 +8,27 @@ import geopandas as gpd
 from shapely import wkt, wkb 
 from shapely.geometry import LineString, Point 
 
+import aiohttp
+import asyncio
+
 from nvdbapiv3 import esriSikkerTekst, nvdbFagdata,  nvdbfagdata2records
 # import nvdbgeotricks 
 
     # nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleElanlegg,     geometri=True), filnavn, 'elanlegg' )
     # nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleLysArmaturer, geometri=True), filnavn, 'lysarmatur' )
+
+headers = {
+  "X-Client" : "Saga: Peders python",
+}
+
+counter = 0
+async def fetch_json(session, url, params):
+  global counter
+  async with session.get(url, params=params, headers=headers) as response:
+    if counter % 10 == 0:
+      print("Fetch #{}".format(counter))
+    counter += 1
+    return await response.json()
 
 
 def finnLysarmatur( relasjonstre, egenskaper=None ): 
@@ -73,8 +89,7 @@ def byttKolonneNavn( myDf ):
     myDf.rename( columns=skiftUt, inplace=True )
     return myDf 
 
-if __name__ == '__main__': 
-
+async def hentLysarmaturer():
     t0 = datetime.now()
     minCRS = 4326
 
@@ -86,70 +101,64 @@ if __name__ == '__main__':
     elsok.filter( { 'srid' : minCRS  })
 
     elsok.statistikk()
-    
-    counter = 0
-    for elAnleggTreff in elsok: 
 
-        counter += 1
-        if counter in [1, 5, 10, 50, 100, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 7500 ] or counter % 10000 == 0: 
-            print( f"Henter objekt {counter} av {elsok.antall} ")
+    async with aiohttp.TCPConnector(limit=15) as connector:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            elanleggRequests = await asyncio.gather(*[fetch_json(session, anlegg['href'], params={ 'dybde' : 4, 'inkluder' : 'alle', 'srid' : minCRS  }) for anlegg in elsok])
 
-        try: 
-            elanlegg = elsok.forbindelse.les( elAnleggTreff['href'], params={ 'dybde' : 4, 'inkluder' : 'alle', 'srid' : minCRS  }  ).json()
-        except ValueError:
-            pass
+
+    for elanlegg in elanleggRequests: 
+        # Finner ut om vi har morobjekt tunnelløp? 
+        if 'relasjoner' in elanlegg and 'foreldre' in elanlegg['relasjoner']: 
+            temp = [ x for x in elanlegg['relasjoner']['foreldre'] if x['type']['id'] == 67 ]
+
+            if len( temp ) >= 1: 
+
+                elanlegg['egenskaper'].append( { 'id' : -1, 
+                                                'egenskapstype' : 'Tekst',
+                                                'navn' : 'I tunnel', 
+                                                'verdi' : 'JA'  } )
+                elanlegg['egenskaper'].append( { 'id' : -2, 
+                                                'egenskapstype' : 'Heltall',
+                                                'navn' : 'Tunnelløp ID', 
+                                                'verdi' : temp[0]['vegobjekter'][0] } )
+
+
+        # plukker ut de egenskapene vi ønsker å sende til lysarmaturer
+        vilha = [ 'Målernummer', 'MålepunktID', 'Bruksområde' ]
+        tmp = [ x for x in elanlegg['egenskaper'] if x['navn'] in vilha ]
+        arveEgenskaper = [ ]
+        for enEg in tmp: 
+            enEg['navn'] = 'ElAnlegg_' + enEg['navn']
+            arveEgenskaper.append( enEg )
+
+        if 'geometri' in elanlegg and 'egenskaper' in elanlegg and len( elanlegg['egenskaper'] ) > 0: 
+            arveEgenskaper.append( { 'id' : -3, 'navn' : 'ElAnlegg_nvdbId',  'verdi' : elanlegg['id'],               'egenskapstype' : 'Heltall'  } )
+            arveEgenskaper.append( { 'id' : -4, 'navn' : 'ElAnlegg_geom',    'verdi' : elanlegg['geometri']['wkt'],  'egenskapstype' : 'Tekst'  } )
+
+            # Finner evt lysarmaturer 
+            # Mulige relasjoner: 
+            #       elAnlegg => bel.strekning => bel.punkt => lysarmatur
+            #       elAnlegg => bel.punkt => lysarmatur
+            # Også mulig å hekte bel.punkt på tunnelløp, bygning, rømningslysstrekning.
+            # Bruker en rekursiv funksjon som traverserer relasjonstreet og samler opp alle armaturer den finner i en liste
+            lysarmaturer = []
+            if 'relasjoner' in elanlegg and 'barn' in elanlegg['relasjoner']: 
+                mineLys =  finnLysarmatur( elanlegg['relasjoner']['barn'], egenskaper=arveEgenskaper )
+                mineLysDf = pd.DataFrame( nvdbfagdata2records( mineLys, vegsegmenter=False ))
+                # Summer og aggregerer! 
+                elanlegg['egenskaper'].append( { 'id' : -5, 'navn' : 'Antall NVDB-objekter lysarmatur', 'verdi' : len( mineLys ),       'egenskapstype' : 'Heltall' }   )
+                if len( mineLysDf ) > 0 and 'Effekt' in mineLysDf.columns: 
+                    elanlegg['egenskaper'].append( { 'id' : -6, 'navn' : 'Samlet effekt, lysarmatur', 'verdi' : mineLysDf['Effekt'].sum(),  'egenskapstype' : 'Flyttall' }   )
+
+                lysarmaturer.extend( mineLys ) 
+
+            # Lagrer til mellomresultater
+            alleElanlegg.append( elanlegg )
+            alleLysArmaturer.extend( lysarmaturer )
         else: 
-
-            # Finner ut om vi har morobjekt tunnelløp? 
-            if 'relasjoner' in elanlegg and 'foreldre' in elanlegg['relasjoner']: 
-                temp = [ x for x in elanlegg['relasjoner']['foreldre'] if x['type']['id'] == 67 ]
-
-                if len( temp ) >= 1: 
-
-                    elanlegg['egenskaper'].append( { 'id' : -1, 
-                                                    'egenskapstype' : 'Tekst',
-                                                    'navn' : 'I tunnel', 
-                                                    'verdi' : 'JA'  } )
-                    elanlegg['egenskaper'].append( { 'id' : -2, 
-                                                    'egenskapstype' : 'Heltall',
-                                                    'navn' : 'Tunnelløp ID', 
-                                                    'verdi' : temp[0]['vegobjekter'][0] } )
-
-
-            # plukker ut de egenskapene vi ønsker å sende til lysarmaturer
-            vilha = [ 'Målernummer', 'MålepunktID', 'Bruksområde' ]
-            tmp = [ x for x in elanlegg['egenskaper'] if x['navn'] in vilha ]
-            arveEgenskaper = [ ]
-            for enEg in tmp: 
-                enEg['navn'] = 'ElAnlegg_' + enEg['navn']
-                arveEgenskaper.append( enEg )
-
-            if 'geometri' in elanlegg and 'egenskaper' in elanlegg and len( elanlegg['egenskaper'] ) > 0: 
-                arveEgenskaper.append( { 'id' : -3, 'navn' : 'ElAnlegg_nvdbId',  'verdi' : elanlegg['id'],               'egenskapstype' : 'Heltall'  } )
-                arveEgenskaper.append( { 'id' : -4, 'navn' : 'ElAnlegg_geom',    'verdi' : elanlegg['geometri']['wkt'],  'egenskapstype' : 'Tekst'  } )
-
-                # Finner evt lysarmaturer 
-                # Mulige relasjoner: 
-                #       elAnlegg => bel.strekning => bel.punkt => lysarmatur
-                #       elAnlegg => bel.punkt => lysarmatur
-                # Også mulig å hekte bel.punkt på tunnelløp, bygning, rømningslysstrekning.
-                # Bruker en rekursiv funksjon som traverserer relasjonstreet og samler opp alle armaturer den finner i en liste
-                lysarmaturer = []
-                if 'relasjoner' in elanlegg and 'barn' in elanlegg['relasjoner']: 
-                    mineLys =  finnLysarmatur( elanlegg['relasjoner']['barn'], egenskaper=arveEgenskaper )
-                    mineLysDf = pd.DataFrame( nvdbfagdata2records( mineLys, vegsegmenter=False ))
-                    # Summer og aggregerer! 
-                    elanlegg['egenskaper'].append( { 'id' : -5, 'navn' : 'Antall NVDB-objekter lysarmatur', 'verdi' : len( mineLys ),       'egenskapstype' : 'Heltall' }   )
-                    if len( mineLysDf ) > 0 and 'Effekt' in mineLysDf.columns: 
-                        elanlegg['egenskaper'].append( { 'id' : -6, 'navn' : 'Samlet effekt, lysarmatur', 'verdi' : mineLysDf['Effekt'].sum(),  'egenskapstype' : 'Flyttall' }   )
-
-                    lysarmaturer.extend( mineLys ) 
-
-                # Lagrer til mellomresultater
-                alleElanlegg.append( elanlegg )
-                alleLysArmaturer.extend( lysarmaturer )
-            else: 
-                print( 'ubrukelig elanlegg-objekt:', json.dumps( elanlegg, indent=4))
+            print( 'ubrukelig elanlegg-objekt:', json.dumps( elanlegg, indent=4))
+        return mineLysDf
 
     mineLysDf = byttKolonneNavn( mineLysDf )
 
