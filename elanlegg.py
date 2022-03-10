@@ -5,33 +5,39 @@ from datetime import datetime
 
 import pandas as pd
 import geopandas as gpd
-from shapely import wkt, wkb 
-from shapely.geometry import LineString, Point 
+from shapely import wkt, wkb
+from shapely.geometry import LineString, Point
 
 import aiohttp
 import asyncio
 
 from nvdbapiv3 import esriSikkerTekst, nvdbFagdata,  nvdbfagdata2records
-# import nvdbgeotricks 
+# import nvdbgeotricks
 
-    # nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleElanlegg,     geometri=True), filnavn, 'elanlegg' )
-    # nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleLysArmaturer, geometri=True), filnavn, 'lysarmatur' )
+# nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleElanlegg,     geometri=True), filnavn, 'elanlegg' )
+# nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleLysArmaturer, geometri=True), filnavn, 'lysarmatur' )
 
 headers = {
-  "X-Client" : "Saga: Peders python",
+    "X-Client": "Saga: Peders python",
 }
 
 counter = 0
+
+
 async def fetch_json(session, url, params):
-  global counter
-  async with session.get(url, params=params, headers=headers) as response:
-    if counter % 10 == 0:
-      print("Fetch #{}".format(counter))
-    counter += 1
-    return await response.json()
+    global counter
+    try:
+        async with session.get(url, params=params, headers=headers) as response:
+            if counter % 100 == 0:
+                print("Fetch #{}".format(counter))
+            counter += 1
+            return await response.json()
+    except asyncio.TimeoutError as e:
+        print('Timeout error for URL: {}\n{}', url, str(e))
+        return None
 
 
-def finnLysarmatur( relasjonstre, egenskaper=None ): 
+def finnLysarmatur(relasjonstre, egenskaper=None):
     """
     Rekursiv funksjon som finner alle lysarmatur-objekter i et relasjonstre.
 
@@ -42,194 +48,210 @@ def finnLysarmatur( relasjonstre, egenskaper=None ):
 
     Returnerer liste med NVDB-objekter 
     """
-    returListe = [] 
+    returListe = []
 
-    for enRelasjonstype in relasjonstre: 
-        for etObjekt in enRelasjonstype['vegobjekter']: 
+    for enRelasjonstype in relasjonstre:
+        for etObjekt in enRelasjonstype['vegobjekter']:
             # Sjekker hvert enkelt objekt og ser om det er en lysarmatur
-            if isinstance( etObjekt, dict) and 'metadata' in etObjekt and etObjekt['metadata']['type']['navn'] == 'Lysarmatur':
+            if isinstance(etObjekt, dict) and 'metadata' in etObjekt and etObjekt['metadata']['type']['navn'] == 'Lysarmatur':
 
                 # Føyer til egenskaper som er oppgitt
-                if egenskaper: 
-                    etObjekt['egenskaper'].extend( egenskaper )
+                if egenskaper:
+                    etObjekt['egenskaper'].extend(egenskaper)
 
-                returListe.append( etObjekt )
+                returListe.append(etObjekt)
 
-            else: 
-            # Traverserer rekursivt alle barn som dette objektet måtte ha
-                if isinstance( etObjekt, dict) and 'relasjoner' in etObjekt and 'barn' in etObjekt['relasjoner']:
+            else:
+                # Traverserer rekursivt alle barn som dette objektet måtte ha
+                if isinstance(etObjekt, dict) and 'relasjoner' in etObjekt and 'barn' in etObjekt['relasjoner']:
 
-                    returListe.extend(  finnLysarmatur( etObjekt['relasjoner']['barn'], egenskaper=egenskaper ) )
+                    returListe.extend(finnLysarmatur(
+                        etObjekt['relasjoner']['barn'], egenskaper=egenskaper))
 
     return returListe
+
 
 alleElanlegg = []
 alleLysArmaturer = []
 
-def byttKolonneNavn( myDf ): 
+
+def byttKolonneNavn(myDf):
     """
     Bytter ut spesialtegn i kolonnenanvn med esriSikkerTekst 
     """
 
-    skiftUt = { }
+    skiftUt = {}
 
-    for col in list( myDf.columns): 
-        nyCol = esriSikkerTekst( col) \
-                .lower() \
-                .replace("æ", "ae") \
-                .replace("ø", "oe") \
-                .replace("å", "aa") \
-                .replace("Æ", "Ae")  \
-                .replace("Ø", "Oe")  \
-                .replace("Å", "Aa") 
+    for col in list(myDf.columns):
+        nyCol = esriSikkerTekst(col) \
+            .lower() \
+            .replace("æ", "ae") \
+            .replace("ø", "oe") \
+            .replace("å", "aa") \
+            .replace("Æ", "Ae")  \
+            .replace("Ø", "Oe")  \
+            .replace("Å", "Aa")
 
-        if nyCol != col: 
+        if nyCol != col:
             skiftUt[col] = nyCol
 
-    myDf.rename( columns=skiftUt, inplace=True )
-    return myDf 
+    myDf.rename(columns=skiftUt, inplace=True)
+    return myDf
+
 
 async def hentLysarmaturer():
     t0 = datetime.now()
     minCRS = 4326
 
-    elsok = nvdbFagdata( 461 )
+    elsok = nvdbFagdata(461)
     # elsok.filter( { 'kartutsnitt' : '129068.662,6819071.488,307292.352,6909072.335' }) # Stort kartutsnitt
     # elsok.filter( { 'kartutsnitt' : '198660.802,6752983.43,262372.596,6784775.827' })
-    # elsok.filter( { 'kartutsnitt' : '231915.469,6754412.201,232089.515,6754500.093' }) # Bitteliten flekk med 1 anlegg 
-    elsok.filter( { 'kommune' : 3048  })
-    elsok.filter( { 'srid' : minCRS  })
+    # elsok.filter( { 'kartutsnitt' : '231915.469,6754412.201,232089.515,6754500.093' }) # Bitteliten flekk med 1 anlegg
+    elsok.filter({'kommune': 3048})
+    elsok.filter({'srid': minCRS})
 
     elsok.statistikk()
 
-    async with aiohttp.TCPConnector(limit=15) as connector:
+    async with aiohttp.TCPConnector(limit=10) as connector:
         async with aiohttp.ClientSession(connector=connector) as session:
-            elanleggRequests = await asyncio.gather(*[fetch_json(session, anlegg['href'], params={ 'dybde' : 4, 'inkluder' : 'alle', 'srid' : minCRS  }) for anlegg in elsok])
+            elanleggRequests = await asyncio.gather(*[fetch_json(session, anlegg['href'], params={'dybde': 4, 'inkluder': 'alle', 'srid': minCRS}) for anlegg in elsok])
 
+    # Timeouts will produce None, so these must be filtered out
+    elanleggRequestsFiltered = filter(lambda x: x != None, elanleggRequests)
 
-    for elanlegg in elanleggRequests: 
-        # Finner ut om vi har morobjekt tunnelløp? 
-        if 'relasjoner' in elanlegg and 'foreldre' in elanlegg['relasjoner']: 
-            temp = [ x for x in elanlegg['relasjoner']['foreldre'] if x['type']['id'] == 67 ]
+    for elanlegg in elanleggRequests:
+        # Finner ut om vi har morobjekt tunnelløp?
+        if 'relasjoner' in elanlegg and 'foreldre' in elanlegg['relasjoner']:
+            temp = [x for x in elanlegg['relasjoner']
+                    ['foreldre'] if x['type']['id'] == 67]
 
-            if len( temp ) >= 1: 
+            if len(temp) >= 1:
 
-                elanlegg['egenskaper'].append( { 'id' : -1, 
-                                                'egenskapstype' : 'Tekst',
-                                                'navn' : 'I tunnel', 
-                                                'verdi' : 'JA'  } )
-                elanlegg['egenskaper'].append( { 'id' : -2, 
-                                                'egenskapstype' : 'Heltall',
-                                                'navn' : 'Tunnelløp ID', 
-                                                'verdi' : temp[0]['vegobjekter'][0] } )
-
+                elanlegg['egenskaper'].append({'id': -1,
+                                               'egenskapstype': 'Tekst',
+                                               'navn': 'I tunnel',
+                                               'verdi': 'JA'})
+                elanlegg['egenskaper'].append({'id': -2,
+                                               'egenskapstype': 'Heltall',
+                                               'navn': 'Tunnelløp ID',
+                                               'verdi': temp[0]['vegobjekter'][0]})
 
         # plukker ut de egenskapene vi ønsker å sende til lysarmaturer
-        vilha = [ 'Målernummer', 'MålepunktID', 'Bruksområde' ]
-        tmp = [ x for x in elanlegg['egenskaper'] if x['navn'] in vilha ]
-        arveEgenskaper = [ ]
-        for enEg in tmp: 
+        vilha = ['Målernummer', 'MålepunktID', 'Bruksområde']
+        tmp = [x for x in elanlegg['egenskaper'] if x['navn'] in vilha]
+        arveEgenskaper = []
+        for enEg in tmp:
             enEg['navn'] = 'ElAnlegg_' + enEg['navn']
-            arveEgenskaper.append( enEg )
+            arveEgenskaper.append(enEg)
 
-        if 'geometri' in elanlegg and 'egenskaper' in elanlegg and len( elanlegg['egenskaper'] ) > 0: 
-            arveEgenskaper.append( { 'id' : -3, 'navn' : 'ElAnlegg_nvdbId',  'verdi' : elanlegg['id'],               'egenskapstype' : 'Heltall'  } )
-            arveEgenskaper.append( { 'id' : -4, 'navn' : 'ElAnlegg_geom',    'verdi' : elanlegg['geometri']['wkt'],  'egenskapstype' : 'Tekst'  } )
+        if 'geometri' in elanlegg and 'egenskaper' in elanlegg and len(elanlegg['egenskaper']) > 0:
+            arveEgenskaper.append({'id': -3, 'navn': 'ElAnlegg_nvdbId',
+                                  'verdi': elanlegg['id'],               'egenskapstype': 'Heltall'})
+            arveEgenskaper.append({'id': -4, 'navn': 'ElAnlegg_geom',
+                                  'verdi': elanlegg['geometri']['wkt'],  'egenskapstype': 'Tekst'})
 
-            # Finner evt lysarmaturer 
-            # Mulige relasjoner: 
+            # Finner evt lysarmaturer
+            # Mulige relasjoner:
             #       elAnlegg => bel.strekning => bel.punkt => lysarmatur
             #       elAnlegg => bel.punkt => lysarmatur
             # Også mulig å hekte bel.punkt på tunnelløp, bygning, rømningslysstrekning.
             # Bruker en rekursiv funksjon som traverserer relasjonstreet og samler opp alle armaturer den finner i en liste
             lysarmaturer = []
-            if 'relasjoner' in elanlegg and 'barn' in elanlegg['relasjoner']: 
-                mineLys =  finnLysarmatur( elanlegg['relasjoner']['barn'], egenskaper=arveEgenskaper )
-                mineLysDf = pd.DataFrame( nvdbfagdata2records( mineLys, vegsegmenter=False ))
-                # Summer og aggregerer! 
-                elanlegg['egenskaper'].append( { 'id' : -5, 'navn' : 'Antall NVDB-objekter lysarmatur', 'verdi' : len( mineLys ),       'egenskapstype' : 'Heltall' }   )
-                if len( mineLysDf ) > 0 and 'Effekt' in mineLysDf.columns: 
-                    elanlegg['egenskaper'].append( { 'id' : -6, 'navn' : 'Samlet effekt, lysarmatur', 'verdi' : mineLysDf['Effekt'].sum(),  'egenskapstype' : 'Flyttall' }   )
+            if 'relasjoner' in elanlegg and 'barn' in elanlegg['relasjoner']:
+                mineLys = finnLysarmatur(
+                    elanlegg['relasjoner']['barn'], egenskaper=arveEgenskaper)
+                mineLysDf = pd.DataFrame(
+                    nvdbfagdata2records(mineLys, vegsegmenter=False))
+                # Summer og aggregerer!
+                elanlegg['egenskaper'].append(
+                    {'id': -5, 'navn': 'Antall NVDB-objekter lysarmatur', 'verdi': len(mineLys),       'egenskapstype': 'Heltall'})
+                if len(mineLysDf) > 0 and 'Effekt' in mineLysDf.columns:
+                    elanlegg['egenskaper'].append(
+                        {'id': -6, 'navn': 'Samlet effekt, lysarmatur', 'verdi': mineLysDf['Effekt'].sum(),  'egenskapstype': 'Flyttall'})
 
-                lysarmaturer.extend( mineLys ) 
+                lysarmaturer.extend(mineLys)
 
             # Lagrer til mellomresultater
-            alleElanlegg.append( elanlegg )
-            alleLysArmaturer.extend( lysarmaturer )
-        else: 
-            print( 'ubrukelig elanlegg-objekt:', json.dumps( elanlegg, indent=4))
+            alleElanlegg.append(elanlegg)
+            alleLysArmaturer.extend(lysarmaturer)
+        else:
+            print('ubrukelig elanlegg-objekt:', json.dumps(elanlegg, indent=4))
         return mineLysDf
 
-    mineLysDf = byttKolonneNavn( mineLysDf )
+    mineLysDf = byttKolonneNavn(mineLysDf)
 
     # Knar på elanlegg-data
-    eldf  = byttKolonneNavn( pd.DataFrame( nvdbfagdata2records( alleElanlegg,     vegsegmenter=False, geometri=True )) )
-    eldf['vegkartlenke'] = 'https://vegkart.atlas.vegvesen.no/#valgt:' + eldf['nvdbid'].astype(str) + ':' + eldf['objekttype'].astype(str)
-    eldf.drop( columns=['vegsegmenter', 'relasjoner'], inplace=True )
-    lysdf = byttKolonneNavn( pd.DataFrame( nvdbfagdata2records( alleLysArmaturer, vegsegmenter=False, geometri=True )) )
-    lysdf['vegkartlenke'] = 'https://vegkart.atlas.vegvesen.no/#valgt:' + lysdf['nvdbid'].astype(str) + ':' + lysdf['objekttype'].astype(str)
-    lysdf.drop( columns=['vegsegmenter', 'relasjoner'], inplace=True )
-    
+    eldf = byttKolonneNavn(pd.DataFrame(nvdbfagdata2records(
+        alleElanlegg,     vegsegmenter=False, geometri=True)))
+    eldf['vegkartlenke'] = 'https://vegkart.atlas.vegvesen.no/#valgt:' + \
+        eldf['nvdbid'].astype(str) + ':' + eldf['objekttype'].astype(str)
+    eldf.drop(columns=['vegsegmenter', 'relasjoner'], inplace=True)
+    lysdf = byttKolonneNavn(pd.DataFrame(nvdbfagdata2records(
+        alleLysArmaturer, vegsegmenter=False, geometri=True)))
+    lysdf['vegkartlenke'] = 'https://vegkart.atlas.vegvesen.no/#valgt:' + \
+        lysdf['nvdbid'].astype(str) + ':' + lysdf['objekttype'].astype(str)
+    lysdf.drop(columns=['vegsegmenter', 'relasjoner'], inplace=True)
 
-
-    # Lagrer til geopackage 
+    # Lagrer til geopackage
     filnavn = 'elanlegg_Norge.gpkg'
-    eldf['geometry'] = eldf['geometri'].apply( lambda x : Point ( wkb.loads( wkb.dumps( wkt.loads( x ), output_dimension=2  ))))
+    eldf['geometry'] = eldf['geometri'].apply(lambda x: Point(
+        wkb.loads(wkb.dumps(wkt.loads(x), output_dimension=2))))
     # Fjerner egengeometri og alle wkt-strenger med geometri, det bare forvirrer
     # Hvis vi trenger wkt-streng så oppretter vi det fra "geometry"-kolonnen (shapely-objekter)
-    eldf.drop(  columns=['geometri', 'geometri_punkt'], inplace=True   )
+    eldf.drop(columns=['geometri', 'geometri_punkt'], inplace=True)
 
-    elGdf = gpd.GeoDataFrame(  eldf, geometry='geometry', crs=minCRS  )
+    elGdf = gpd.GeoDataFrame(eldf, geometry='geometry', crs=minCRS)
 
     # elGdf.to_file( filnavn, layer='elanlegg', driver='GPKG')
 
     # lysdf['geometry'] = lysdf['geometri'].apply( lambda x : Point ( wkb.loads( wkb.dumps( wkt.loads( x ), output_dimension=2  ))))
-    lysdf.drop(  columns=[ 'geometri_punkt'], inplace=True   )
-    lysdf.rename( columns={ 'geometri' : 'lysarmatur_geom'  }, inplace=True )
+    lysdf.drop(columns=['geometri_punkt'], inplace=True)
+    lysdf.rename(columns={'geometri': 'lysarmatur_geom'}, inplace=True)
 
     # lysGdf = gpd.GeoDataFrame(  lysdf, geometry='geometry', crs=minCRS  )
     # lysGdf.to_file( filnavn, layer='lysarmatur', driver='GPKG')
-
 
     # nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleElanlegg,     geometri=True), filnavn, 'elanlegg' )
     # nvdbgeotricks.records2gpkg( nvdbfagdata2records( alleLysArmaturer, geometri=True), filnavn, 'lysarmatur' )
 
     # Lager fancy kartvisning med linje fra lysarmatur => El.anlegg
     # For å tvinge 2D-geometri bruker vi tricks med wkb.loads( wkb.dumps( GEOM, output_dimension=2 ))
-    lysdf['geometry'] = lysdf.apply( lambda x: LineString( [  wkb.loads( wkb.dumps( wkt.loads (x['lysarmatur_geom']    ), output_dimension=2)), 
-                                                              wkb.loads( wkb.dumps( wkt.loads( x['elanlegg_geom']), output_dimension=2 )) ] ), axis=1) 
+    lysdf['geometry'] = lysdf.apply(lambda x: LineString([wkb.loads(wkb.dumps(wkt.loads(x['lysarmatur_geom']), output_dimension=2)),
+                                                          wkb.loads(wkb.dumps(wkt.loads(x['elanlegg_geom']), output_dimension=2))]), axis=1)
 
-    minGdf = gpd.GeoDataFrame( lysdf, geometry='geometry', crs=minCRS )       
-    # må droppe kolonne vegsegmenter hvis data er hentet med vegsegmenter=False 
+    minGdf = gpd.GeoDataFrame(lysdf, geometry='geometry', crs=minCRS)
+    # må droppe kolonne vegsegmenter hvis data er hentet med vegsegmenter=False
     if 'vegsegmenter' in minGdf.columns:
-        minGdf.drop( 'vegsegmenter', 1, inplace=True)
+        minGdf.drop('vegsegmenter', 1, inplace=True)
     if 'relasjoner' in minGdf.columns:
-        minGdf.drop( 'relasjoner', 1, inplace=True)
+        minGdf.drop('relasjoner', 1, inplace=True)
 
+    # Pynter på mineLysDf
+    mineLysDf.rename(columns={'geometri': 'armatur_geom'}, inplace=True)
+    mineLysDf.drop(columns=['vegsegmenter', 'relasjoner'], inplace=True)
+    mineLysDf['geometry'] = mineLysDf.apply(lambda x:
+                                            LineString([wkb.loads(wkb.dumps(wkt.loads(x['armatur_geom']), output_dimension=2)),
+                                                        wkb.loads(wkb.dumps(wkt.loads(x['elanlegg_geom']), output_dimension=2))]), axis=1)
 
-    # Pynter på mineLysDf 
-    mineLysDf.rename( columns={'geometri' : 'armatur_geom'}, inplace=True) 
-    mineLysDf.drop( columns=[ 'vegsegmenter', 'relasjoner'], inplace=True )
-    mineLysDf['geometry'] = mineLysDf.apply( lambda x: \
-        LineString( [  wkb.loads( wkb.dumps( wkt.loads (x['armatur_geom']    ), output_dimension=2)), 
-                       wkb.loads( wkb.dumps( wkt.loads( x['elanlegg_geom']), output_dimension=2 )) ] ), axis=1) 
+    mineLysDf['wkt_geom'] = mineLysDf['geometry'].apply(lambda x: x.wkt)
 
-    mineLysDf['wkt_geom'] = mineLysDf['geometry'].apply( lambda x : x.wkt )
+    mineLysDf['armatur_geom'] = mineLysDf['armatur_geom'].apply(
+        lambda x: wkt.dumps(wkb.loads(wkb.dumps(wkt.loads(x), output_dimension=2))))
+    mineLysDf['elanlegg_geom'] = mineLysDf['elanlegg_geom'].apply(
+        lambda x: wkt.dumps(wkb.loads(wkb.dumps(wkt.loads(x), output_dimension=2))))
 
-    mineLysDf['armatur_geom']  = mineLysDf['armatur_geom'].apply(  lambda x : wkt.dumps( wkb.loads( wkb.dumps( wkt.loads( x ) , output_dimension=2 ))))
-    mineLysDf['elanlegg_geom'] = mineLysDf['elanlegg_geom'].apply( lambda x : wkt.dumps( wkb.loads( wkb.dumps( wkt.loads( x ) , output_dimension=2 ))))
+    minGdf.to_file(filnavn, layer='kartvisning_lysarmatur', driver="GPKG")
 
-    minGdf.to_file( filnavn, layer='kartvisning_lysarmatur', driver="GPKG")  
+    #  Lagrer til excel
+    with pd.ExcelWriter('elanlegg_lysarmatur_Norge.xlsx') as writer:
 
-    #  Lagrer til excel 
-    with pd.ExcelWriter( 'elanlegg_lysarmatur_Norge.xlsx') as writer: 
-
-        # Fjerner geometrikolonner fra excel 
-        col_eldf = [ x for x in list( eldf.columns)  if not 'geom' in x.lower()  ]
-        col_lys =  [ x for x in list( lysdf.columns) if not 'geom' in x.lower() ]
-        eldf[ col_eldf ].to_excel( writer, sheet_name='Elektrisk anlegg',  index=False )
-        lysdf[ col_lys ].to_excel( writer, sheet_name='Lysarmatur',        index=False )
-
+        # Fjerner geometrikolonner fra excel
+        col_eldf = [x for x in list(eldf.columns) if not 'geom' in x.lower()]
+        col_lys = [x for x in list(lysdf.columns) if not 'geom' in x.lower()]
+        eldf[col_eldf].to_excel(
+            writer, sheet_name='Elektrisk anlegg',  index=False)
+        lysdf[col_lys].to_excel(
+            writer, sheet_name='Lysarmatur',        index=False)
 
     dT = datetime.now() - t0
-    print( f"Tidsbruk: { round( dT.total_seconds(), 1)} sekunder" )
+    print(f"Tidsbruk: { round( dT.total_seconds(), 1)} sekunder")
