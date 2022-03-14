@@ -22,18 +22,22 @@ headers = {
 }
 
 counter = 0
-
+counter_numbers = [1, 5, 10, 100, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000]
 
 async def fetch_json(session, url, params):
     global counter
     try:
         async with session.get(url, params=params, headers=headers) as response:
-            if counter % 100 == 0:
+            if counter in counter_numbers:
                 print("Fetch #{}".format(counter))
             counter += 1
+
+            if response.status != 200:
+                print("Got status != 200: ", response.status)
+                exit()
             return await response.json()
     except asyncio.TimeoutError as e:
-        print('Timeout error for URL: {}\n{}', url, str(e))
+        print('Timeout error:', url, str(e))
         return None
 
 
@@ -98,28 +102,38 @@ def byttKolonneNavn(myDf):
     myDf.rename(columns=skiftUt, inplace=True)
     return myDf
 
+minCRS = 4326
 
 async def hentLysarmaturer():
-    t0 = datetime.now()
-    minCRS = 4326
 
     elsok = nvdbFagdata(461)
     # elsok.filter( { 'kartutsnitt' : '129068.662,6819071.488,307292.352,6909072.335' }) # Stort kartutsnitt
     # elsok.filter( { 'kartutsnitt' : '198660.802,6752983.43,262372.596,6784775.827' })
     # elsok.filter( { 'kartutsnitt' : '231915.469,6754412.201,232089.515,6754500.093' }) # Bitteliten flekk med 1 anlegg
-    elsok.filter({'kommune': 3048})
+    # elsok.filter({'kommune': 3048})
     elsok.filter({'srid': minCRS})
 
     elsok.statistikk()
 
+    # A total of 10 minutes cumulative timeout for ALL requests
+    timeout = aiohttp.ClientTimeout(total=10*60)
+
     async with aiohttp.TCPConnector(limit=10) as connector:
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             elanleggRequests = await asyncio.gather(*[fetch_json(session, anlegg['href'], params={'dybde': 4, 'inkluder': 'alle', 'srid': minCRS}) for anlegg in elsok])
 
     # Timeouts will produce None, so these must be filtered out
-    elanleggRequestsFiltered = filter(lambda x: x != None, elanleggRequests)
+    elanleggRequestsFiltered = list(filter(lambda x: x != None, elanleggRequests))
+    return elanleggRequestsFiltered
 
-    for elanlegg in elanleggRequests:
+def lysarmaturerTilDataframe(armaturer):
+    df = pd.DataFrame(armaturer)
+    return df
+
+
+def masserLysarmaturer(lysarmaturResponser):
+    t0 = datetime.now()
+    for elanlegg in lysarmaturResponser:
         # Finner ut om vi har morobjekt tunnelløp?
         if 'relasjoner' in elanlegg and 'foreldre' in elanlegg['relasjoner']:
             temp = [x for x in elanlegg['relasjoner']
@@ -176,8 +190,8 @@ async def hentLysarmaturer():
             alleLysArmaturer.extend(lysarmaturer)
         else:
             print('ubrukelig elanlegg-objekt:', json.dumps(elanlegg, indent=4))
-        return mineLysDf
 
+    # Done with for loop here
     mineLysDf = byttKolonneNavn(mineLysDf)
 
     # Knar på elanlegg-data
@@ -225,6 +239,10 @@ async def hentLysarmaturer():
         minGdf.drop('vegsegmenter', 1, inplace=True)
     if 'relasjoner' in minGdf.columns:
         minGdf.drop('relasjoner', 1, inplace=True)
+    
+    # Peders hack
+    mineLysDf = byttKolonneNavn(pd.DataFrame(
+                    nvdbfagdata2records(alleLysArmaturer, vegsegmenter=False)))
 
     # Pynter på mineLysDf
     mineLysDf.rename(columns={'geometri': 'armatur_geom'}, inplace=True)
@@ -255,3 +273,4 @@ async def hentLysarmaturer():
 
     dT = datetime.now() - t0
     print(f"Tidsbruk: { round( dT.total_seconds(), 1)} sekunder")
+    return mineLysDf
